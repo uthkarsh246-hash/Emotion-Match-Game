@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emotion Match – AI Face Game</title>
+
+<!--
+  ============================================================================
+  EMOTION MATCH  –  a browser game powered by real-time facial-expression AI
+  ----------------------------------------------------------------------------
+  * 100% client side: no backend, no uploads, no image storage.
+  * AI library : face-api.js (@vladmandic fork, built on TensorFlow.js), CDN.
+  * Models     : TinyFaceDetector (find the face) +
+                 FaceExpressionNet (classify the expression), CDN.
+  * Only the high score (a single number) is saved, in localStorage.
+
+  FILE MAP (search for the ===== banners below)
+    1. CSS      – theme, layout, projector-friendly sizes
+    2. HTML     – three screens: Start, Game, Results
+    3. JS       – config, sound, camera, AI loop, game state machine, UI
+  ============================================================================
+-->
+
+<!-- face-api.js: loads TensorFlow.js + the detection/expression code -->
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js"></script>
+
+<style>
+/* ===================== 1. CSS ===================== */
+/* Colour tokens. Dark background + saturated accents = stays readable on a
+   washed-out projector. Font sizes are deliberately large. */
+:root {
+  --bg: #0b1020;
+  --panel: #151c36;
+  --panel-2: #1d2647;
+  --text: #f5f7ff;
+  --muted: #a9b4de;
+  --accent: #7c5cff;
+  --good: #2ee59d;
+  --bad: #ff5c7a;
+  --warn: #ffd23f;
+  --radius: 22px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  background: radial-gradient(1200px 700px at 15% -10%, #2a1f6b 0%, transparent 60%),
+              radial-gradient(1000px 600px at 110% 10%, #0f4f6b 0%, transparent 55%),
+              var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.45;
+}
+h1, h2, h3 { margin: 0 0 .4em; line-height: 1.1; }
+button { font: inherit; cursor: pointer; }
+.hidden { display: none !important; }
+
+/* Each screen is a full-width section; JS toggles .hidden */
+.screen { max-width: 1280px; margin: 0 auto; padding: 24px 28px 40px; }
+.card {
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 2px solid #2b3668; border-radius: var(--radius); padding: 24px 28px;
+  box-shadow: 0 10px 40px rgba(0,0,0,.35);
+}
+
+/* Buttons */
+.btn {
+  border: 0; border-radius: 16px; padding: 16px 34px; font-weight: 800; font-size: 1.15em;
+  color: #fff; background: linear-gradient(135deg, #7c5cff, #ff5ca8);
+  box-shadow: 0 8px 24px rgba(124,92,255,.45); transition: transform .12s;
+}
+.btn:hover { transform: translateY(-2px) scale(1.03); }
+.btn:focus-visible, .diff:focus-visible, summary:focus-visible { outline: 4px solid var(--warn); outline-offset: 3px; }
+.btn.secondary { background: #2b3668; box-shadow: none; }
+.btn:disabled { opacity: .6; cursor: wait; transform: none; }
+
+/* ---------- Start screen ---------- */
+.hero { text-align: center; padding-top: 10px; }
+.hero h1 { font-size: clamp(2.6rem, 6vw, 4.6rem); letter-spacing: -1px; }
+.hero h1 span { background: linear-gradient(90deg, #ffd23f, #ff5ca8, #7c5cff, #2ee59d);
+                -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero p { color: var(--muted); max-width: 760px; margin: 0 auto 18px; }
+.emoji-row { font-size: clamp(2.4rem, 6vw, 4rem); letter-spacing: .15em; margin: 8px 0 18px; }
+.diffs { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin: 18px 0 26px; }
+.diff {
+  background: var(--panel-2); color: var(--text); border: 3px solid #35417a; border-radius: 16px;
+  padding: 12px 26px; font-weight: 700; min-width: 170px;
+}
+.diff small { display: block; color: var(--muted); font-weight: 500; }
+.diff.active { border-color: var(--good); background: #12392f; box-shadow: 0 0 0 4px rgba(46,229,157,.2); }
+.privacy { display: inline-block; background: #12392f; color: #9bf5cf; border-radius: 999px;
+           padding: 6px 16px; font-size: .8em; margin-top: 18px; }
+.camera-note { margin: 0 auto 18px; max-width: 700px; font-size: .9em; color: var(--muted); }
+.status { min-height: 1.6em; margin-top: 14px; color: var(--warn); font-weight: 600; }
+
+/* Info accordions (How the AI works / Ethics) */
+.info { margin-top: 30px; display: grid; gap: 14px; }
+details { background: var(--panel); border: 2px solid #2b3668; border-radius: 18px; padding: 14px 22px; }
+summary { font-weight: 800; font-size: 1.1em; cursor: pointer; }
+details p, details li { color: #d6dcff; font-size: .9em; }
+details ul { padding-left: 1.2em; }
+
+/* ---------- Game screen ---------- */
+.hud { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+       flex-wrap: wrap; margin-bottom: 16px; }
+.pill { background: var(--panel-2); border: 2px solid #35417a; border-radius: 999px;
+        padding: 8px 22px; font-weight: 800; font-size: 1.15em; }
+.pill b { color: var(--warn); }
+.game-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 22px; align-items: start; }
+@media (max-width: 900px) { .game-grid { grid-template-columns: 1fr; } }
+
+/* Webcam: video + overlay canvas, both mirrored so it feels like a mirror */
+.cam { position: relative; width: 100%; aspect-ratio: 4 / 3; background: #000;
+       border-radius: var(--radius); overflow: hidden; border: 4px solid #35417a; transition: border-color .2s; }
+.cam.match { border-color: var(--good); box-shadow: 0 0 40px rgba(46,229,157,.55); }
+.cam video, .cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+.cam .badge { position: absolute; left: 12px; bottom: 12px; background: rgba(0,0,0,.65);
+              border-radius: 12px; padding: 4px 12px; font-size: .75em; z-index: 2; }
+#noFace { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2;
+          background: var(--warn); color: #222; font-weight: 800; border-radius: 12px; padding: 4px 16px; font-size: .8em; }
+
+/* Target emoji + timer ring */
+.target { text-align: center; position: relative; }
+.target .label { color: var(--muted); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: .75em; }
+.big-emoji { font-size: clamp(7rem, 16vw, 11rem); line-height: 1.05; transition: transform .2s; }
+.big-emoji.pop { animation: pop .45s ease; }
+@keyframes pop { 0% { transform: scale(.5); } 70% { transform: scale(1.15); } 100% { transform: scale(1); } }
+.target .name { font-size: 1.6em; font-weight: 800; }
+.timer-wrap { position: absolute; right: 0; top: 0; width: 104px; height: 104px; }
+.timer-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.timer-wrap circle { fill: none; stroke-width: 10; }
+.timer-wrap .bg { stroke: #2b3668; }
+.timer-wrap .fg { stroke: var(--good); stroke-linecap: round; stroke-dasharray: 289; transition: stroke .2s; }
+.timer-num { position: absolute; inset: 0; display: grid; place-items: center; font-weight: 900; font-size: 1.7em; }
+.timer-wrap.low .fg { stroke: var(--bad); }
+
+/* Hold progress */
+.hold { margin: 10px 0 4px; }
+.hold .track { height: 20px; background: #0e1430; border-radius: 999px; overflow: hidden; border: 2px solid #35417a; }
+.hold .fill { height: 100%; width: 0; background: linear-gradient(90deg, #2ee59d, #ffd23f); }
+.hold small { color: var(--muted); }
+
+/* Confidence bars – the "how the AI thinks" panel */
+.bars { margin-top: 14px; }
+.bars h3 { font-size: 1em; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+.bar-row { display: grid; grid-template-columns: 150px 1fr 64px; align-items: center; gap: 10px; margin: 7px 0; }
+.bar-row .nm { font-weight: 700; white-space: nowrap; }
+.bar-row .track { height: 24px; background: #0e1430; border-radius: 10px; overflow: hidden; border: 2px solid #2b3668; }
+.bar-row .fill { height: 100%; width: 0; border-radius: 8px; transition: width .12s linear; }
+.bar-row .pc { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; }
+.bar-row.top .nm { color: var(--warn); }
+.bar-row.target-row .nm::after { content: " 🎯"; }
+
+/* Feedback banner shown between rounds */
+.feedback { position: absolute; inset: 0; display: grid; place-items: center; font-size: 2.2em; font-weight: 900;
+            background: rgba(11,16,32,.82); border-radius: var(--radius); z-index: 3; text-align: center; }
+.feedback.ok { color: var(--good); } .feedback.fail { color: var(--bad); }
+
+/* ---------- Results ---------- */
+.results { text-align: center; }
+.final { font-size: clamp(4rem, 12vw, 8rem); font-weight: 900; line-height: 1;
+         background: linear-gradient(90deg, #ffd23f, #ff5ca8); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.new-high { color: var(--good); font-weight: 900; font-size: 1.5em; }
+.recap { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin: 18px 0 26px; }
+.recap span { background: var(--panel-2); border-radius: 14px; padding: 6px 14px; font-size: 1.4em; border: 2px solid #35417a; }
+.recap span.ok { border-color: var(--good); } .recap span.fail { border-color: var(--bad); opacity: .75; }
+
+/* Sound toggle (top-right on every screen) */
+#mute { position: fixed; bottom: 14px; right: 16px; z-index: 10; background: var(--panel-2); border: 2px solid #35417a;
+        color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 1em; }
+</style>
+</head>
+
+<body>
+<button id="mute" aria-label="Toggle sound">🔊 Sound on</button>
+
+<!-- ===================== 2. HTML ===================== -->
+
+<!-- ---------- Screen 1: START ---------- -->
+<main id="screenStart" class="screen">
+  <div class="hero">
+    <h1>🎭 <span>Emotion Match</span></h1>
+    <p>Your webcam is the controller! Copy the emoji with your face and hold it for
+       <b>1 second</b> before time runs out. 10 rounds · +10 points each.</p>
+    <div class="emoji-row">😀 😢 😠 😲 😐</div>
+
+    <h3>Choose difficulty</h3>
+    <div class="diffs" id="diffs"><!-- buttons injected by JS from CONFIG.difficulty --></div>
+
+    <p class="camera-note">📷 When you press Start, your browser will politely ask for camera access.
+       The video stays on <b>your</b> computer – nothing is recorded, saved or uploaded.</p>
+    <button class="btn" id="startBtn">▶ Start Game</button>
+    <div class="status" id="startStatus" role="status"></div>
+    <div><span class="privacy">🔒 100% local processing · no images stored · no backend</span></div>
+  </div>
+
+  <div class="info">
+    <details>
+      <summary>🧠 How does the AI work?</summary>
+      <ul>
+        <li><b>Step 1 – Face detection:</b> <i>TinyFaceDetector</i> (a small CNN, SSD-MobileNet style) scans each video frame and returns a box around the face.</li>
+        <li><b>Step 2 – Expression classification:</b> the face crop goes into <i>FaceExpressionNet</i>, a neural network trained on labelled face photos. It outputs a <b>probability for 7 emotions</b> that add up to 100%.</li>
+        <li><b>Step 3 – Game logic:</b> we smooth those numbers over a few frames, pick the strongest one, and check if it equals the target emoji for 1 continuous second.</li>
+        <li>Everything runs in your browser through <b>TensorFlow.js</b> (WebGL). The bars in the game are the model's raw confidence – this is the AI "thinking" live.</li>
+      </ul>
+    </details>
+    <details>
+      <summary>⚖️ Ethics &amp; Limitations</summary>
+      <ul>
+        <li><b>It reads expressions, not feelings.</b> A smile does not prove someone is happy. The model only classifies facial muscle patterns – people mask, fake or feel emotions without showing them.</li>
+        <li><b>Bias across faces:</b> training datasets over-represent some ages, skin tones, genders and cultures. Accuracy can be lower for under-represented groups, and expression norms differ between cultures.</li>
+        <li><b>Lighting &amp; camera:</b> dim or back-lit rooms, shadows, low-resolution webcams, glasses, masks, beards and head angles all reduce accuracy.</li>
+        <li><b>Hard-to-tell emotions:</b> "neutral", "sad" and "angry" are often confused; subtle or mixed expressions are unreliable. Exaggerate for best results.</li>
+        <li><b>Privacy:</b> frames are processed in memory and discarded. This game never stores or sends images. Real products that analyse emotions (hiring, schools, ads) raise serious consent and surveillance concerns and should not be used for high-stakes decisions.</li>
+        <li><b>Takeaway:</b> great for a fun game, not a reliable judge of a person's inner state.</li>
+      </ul>
+    </details>
+  </div>
+</main>
+
+<!-- ---------- Screen 2: GAME ---------- -->
+<main id="screenGame" class="screen hidden">
+  <div class="hud">
+    <div class="pill">Round <b id="roundNum">1</b>/<span id="roundMax">10</span></div>
+    <div class="pill" id="diffPill">Medium</div>
+    <div class="pill">Score <b id="score">0</b></div>
+    <div class="pill">Best <b id="best">0</b></div>
+  </div>
+
+  <div class="game-grid">
+    <!-- Left: live webcam (the video is only drawn on screen, never stored) -->
+    <div class="cam" id="cam">
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+      <div id="noFace" class="hidden">😶 No face found – move into view</div>
+      <div class="badge">🔒 processed locally</div>
+    </div>
+
+    <!-- Right: target, timer, hold progress, AI confidence bars -->
+    <div>
+      <div class="card target" style="position:relative">
+        <div class="timer-wrap" id="timerWrap">
+          <svg viewBox="0 0 100 100"><circle class="bg" cx="50" cy="50" r="46"/><circle class="fg" id="timerArc" cx="50" cy="50" r="46"/></svg>
+          <div class="timer-num" id="timerNum">5</div>
+        </div>
+        <div class="label">Make this face</div>
+        <div class="big-emoji" id="bigEmoji">😀</div>
+        <div class="name" id="targetName">Happy</div>
+        <div class="hold">
+          <div class="track"><div class="fill" id="holdFill"></div></div>
+          <small id="holdText">Hold the expression for 1 second</small>
+        </div>
+        <div class="feedback hidden" id="feedback"></div>
+      </div>
+
+      <div class="card bars">
+        <h3>🤖 AI confidence – what the model sees</h3>
+        <div id="bars"><!-- rows injected by JS --></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ---------- Screen 3: RESULTS ---------- -->
+<main id="screenResults" class="screen hidden">
+  <div class="card results">
+    <h2>🏁 Game over!</h2>
+    <div class="final" id="finalScore">0</div>
+    <div>points · <b id="correctCount">0</b>/10 matched · <span id="resDiff"></span></div>
+    <div class="new-high hidden" id="newHigh">🎉 New high score!</div>
+    <p>🏆 High score (<span id="resDiff2"></span>): <b id="resBest">0</b></p>
+    <div class="recap" id="recap"></div>
+    <button class="btn" id="againBtn">🔁 Play again</button>
+    <button class="btn secondary" id="menuBtn">⚙ Change difficulty</button>
+  </div>
+</main>
+
+<!-- ===================== 3. JAVASCRIPT ===================== -->
+<script>
+"use strict";
+
+/* ---------------------------------------------------------------
+   3.1  CONFIG – everything you may want to tweak lives here
+   --------------------------------------------------------------- */
+const CONFIG = {
+  rounds: 10,              // rounds per game
+  pointsPerMatch: 10,      // score for each successful round
+  holdMs: 1000,            // how long the expression must be held
+  minConfidence: 0.45,     // matching emotion must be the top one AND above this
+  feedbackMs: 1300,        // pause between rounds to show ✔ / ✘
+  difficulty: {            // seconds per round
+    easy:   { label: 'Easy',   seconds: 7 },
+    medium: { label: 'Medium', seconds: 5 },
+    hard:   { label: 'Hard',   seconds: 3 },
+  },
+  // CDN location of the pretrained model weights (downloaded once, run locally)
+  modelUrl: 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/',
+};
+
+// The five emotions used in the game. `key` must match face-api's output names.
+const EMOTIONS = [
+  { key: 'happy',     emoji: '😀', label: 'Happy',     color: '#ffd23f' },
+  { key: 'sad',       emoji: '😢', label: 'Sad',       color: '#4da3ff' },
+  { key: 'angry',     emoji: '😠', label: 'Angry',     color: '#ff5c7a' },
+  { key: 'surprised', emoji: '😲', label: 'Surprised', color: '#c07bff' },
+  { key: 'neutral',   emoji: '😐', label: 'Neutral',   color: '#2ee59d' },
+];
+// face-api also outputs these two; we group them as "Other" so bars sum to ~100%
+const OTHER_KEYS = ['fearful', 'disgusted'];
+
+/* ---------------------------------------------------------------
+   3.2  Small helpers
+   --------------------------------------------------------------- */
+const $ = (id) => document.getElementById(id);
+const show = (el) => el.classList.remove('hidden');
+const hide = (el) => el.classList.add('hidden');
+
+/* ---------------------------------------------------------------
+   3.3  SOUND – generated with the Web Audio API (no audio files needed)
+   --------------------------------------------------------------- */
+const Sound = {
+  ctx: null, muted: false,
+  init() {                                   // must be called from a user click
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) this.ctx = new AC();
+    }
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  },
+  // play one tone: frequency (Hz), start delay (s), duration (s), waveform
+  tone(freq, delay, dur, type = 'sine', vol = 0.25) {
+    if (!this.ctx || this.muted) return;
+    const t0 = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type; osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, t0);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);   // fade out
+    osc.connect(gain).connect(this.ctx.destination);
+    osc.start(t0); osc.stop(t0 + dur);
+  },
+  correct()  { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, i * 0.08, 0.25, 'triangle')); },
+  timeUp()   { this.tone(220, 0, 0.3, 'sawtooth'); this.tone(165, 0.25, 0.5, 'sawtooth'); },
+  tick()     { this.tone(880, 0, 0.08, 'square', 0.08); },
+  fanfare()  { [523, 659, 784, 659, 784, 1047].forEach((f, i) => this.tone(f, i * 0.12, 0.3, 'triangle')); },
+};
+$('mute').addEventListener('click', () => {
+  Sound.muted = !Sound.muted;
+  $('mute').textContent = Sound.muted ? '🔇 Sound off' : '🔊 Sound on';
+});
+
+/* ---------------------------------------------------------------
+   3.4  HIGH SCORE – the ONLY thing we store (one number per difficulty)
+   --------------------------------------------------------------- */
+const Store = {
+  get(diff) { try { return +localStorage.getItem('emotionMatchBest_' + diff) || 0; } catch (e) { return 0; } },
+  set(diff, v) { try { localStorage.setItem('emotionMatchBest_' + diff, v); } catch (e) { /* storage blocked – ignore */ } },
+};
+
+/* ---------------------------------------------------------------
+   3.5  AI + CAMERA
+   --------------------------------------------------------------- */
+const video = $('video');
+const overlay = $('overlay');
+
+// Latest smoothed probability for every emotion (0..1). The game reads this.
+const probs = { happy: 0, sad: 0, angry: 0, surprised: 0, neutral: 0, other: 0 };
+let faceVisible = false;
+let aiReady = false;       // models loaded + camera running
+let demoMode = false;      // keyboard fallback if the camera is unavailable
+let detecting = false;
+
+// Load the two neural networks from the CDN (cached by the browser afterwards)
+async function loadModels() {
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(CONFIG.modelUrl),   // finds faces
+    faceapi.nets.faceExpressionNet.loadFromUri(CONFIG.modelUrl),  // classifies emotion
+  ]);
+}
+
+// Ask for camera permission and attach the stream to the <video> element
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }, audio: false,
+  });
+  video.srcObject = stream;
+  await new Promise((res) => (video.onloadedmetadata = res));
+  await video.play();
+  overlay.width = video.videoWidth;      // canvas matches the camera resolution
+  overlay.height = video.videoHeight;
+}
+
+// Continuous detection loop: runs ~10-15 times per second
+async function detectLoop() {
+  if (!detecting) return;
+  try {
+    // detectSingleFace → find the biggest face; withFaceExpressions → run the emotion network on it
+    const result = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 }))
+      .withFaceExpressions();
+    applyResult(result);
+  } catch (e) { console.warn('Detection error', e); }
+  setTimeout(detectLoop, 50);
+}
+
+// Turn a raw model result into smoothed probabilities + draw the face box
+function applyResult(result) {
+  const ctx = overlay.getContext('2d');
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  const raw = { happy: 0, sad: 0, angry: 0, surprised: 0, neutral: 0, other: 0 };
+
+  if (result) {
+    const e = result.expressions;
+    EMOTIONS.forEach((m) => (raw[m.key] = e[m.key] || 0));
+    raw.other = OTHER_KEYS.reduce((s, k) => s + (e[k] || 0), 0);
+    drawBox(ctx, result.detection.box);
+  }
+  faceVisible = !!result;
+  $('noFace').classList.toggle('hidden', faceVisible || !aiReady);
+
+  // Exponential moving average: new = 50% old + 50% fresh. Removes jitter so the
+  // bars look smooth and one bad frame can't ruin a round.
+  Object.keys(probs).forEach((k) => (probs[k] = probs[k] * 0.5 + raw[k] * 0.5));
+}
+
+// Draw four green corner brackets around the detected face
+function drawBox(ctx, b) {
+  const L = Math.min(b.width, b.height) * 0.22;
+  ctx.strokeStyle = '#2ee59d'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath();
+  [[b.x, b.y, 1, 1], [b.x + b.width, b.y, -1, 1], [b.x, b.y + b.height, 1, -1], [b.x + b.width, b.y + b.height, -1, -1]]
+    .forEach(([x, y, dx, dy]) => { ctx.moveTo(x + dx * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + dy * L); });
+  ctx.stroke();
+}
+
+/* Keyboard fallback so the demo never dies: keys 1-5 act as the emotions.
+   Only active when the camera/AI could not start. */
+const demoKeys = {};
+window.addEventListener('keydown', (e) => { demoKeys[e.key] = true; });
+window.addEventListener('keyup', (e) => { demoKeys[e.key] = false; });
+setInterval(() => {
+  if (!demoMode) return;
+  faceVisible = true;
+  const anyKey = EMOTIONS.some((m, i) => demoKeys[String(i + 1)]);
+  EMOTIONS.forEach((m, i) => {
+    const target = demoKeys[String(i + 1)] ? 0.9 : (i === 4 && !anyKey ? 0.6 : 0.02);   // neutral by default
+    probs[m.key] = probs[m.key] * 0.5 + target * 0.5;
+  });
+}, 50);
+
+/* ---------------------------------------------------------------
+   3.6  GAME STATE
+   --------------------------------------------------------------- */
+const state = {
+  difficulty: 'medium',
+  round: 0, score: 0,
+  target: null, lastTarget: null,
+  phase: 'idle',              // idle | play | feedback
+  roundStart: 0, holdStart: null,
+  results: [],                // [{emoji, ok}] for the recap
+  timerId: null, lastSecond: null,
+};
+
+// ----- Build the difficulty buttons and the confidence bars from config -----
+function buildUI() {
+  const wrap = $('diffs');
+  Object.entries(CONFIG.difficulty).forEach(([key, d]) => {
+    const b = document.createElement('button');
+    b.className = 'diff'; b.dataset.key = key;
+    b.innerHTML = `${d.label}<small>${d.seconds} seconds</small>`;
+    b.onclick = () => selectDifficulty(key);
+    wrap.appendChild(b);
+  });
+  selectDifficulty('medium');
+
+  const bars = $('bars');
+  [...EMOTIONS, { key: 'other', emoji: '🤔', label: 'Other', color: '#7d88b8' }].forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'bar-row'; row.id = 'row_' + m.key;
+    row.innerHTML = `<span class="nm">${m.emoji} ${m.label}</span>
+      <div class="track"><div class="fill" id="fill_${m.key}" style="background:${m.color}"></div></div>
+      <span class="pc" id="pc_${m.key}">0%</span>`;
+    bars.appendChild(row);
+  });
+}
+function selectDifficulty(key) {
+  state.difficulty = key;
+  document.querySelectorAll('.diff').forEach((b) => b.classList.toggle('active', b.dataset.key === key));
+}
+const roundSeconds = () => CONFIG.difficulty[state.difficulty].seconds;
+
+// ----- Screen switching -----
+function showScreen(name) {
+  ['Start', 'Game', 'Results'].forEach((n) => hide($('screen' + n)));
+  show($('screen' + name));
+  window.scrollTo(0, 0);
+}
+
+// ----- START button: load AI, get camera, begin -----
+$('startBtn').addEventListener('click', async () => {
+  Sound.init();
+  const btn = $('startBtn'), status = $('startStatus');
+  if (aiReady || demoMode) return beginGame();
+
+  btn.disabled = true;
+  status.style.color = 'var(--warn)';
+  try {
+    if (!window.faceapi) throw new Error('AI library not loaded (are you online?)');
+    status.textContent = '⏳ Loading the AI models (first time may take a few seconds)…';
+    await loadModels();
+    status.textContent = '📷 Please click "Allow" when your browser asks to use the camera…';
+    await startCamera();
+    aiReady = true; detecting = true; detectLoop();
+    status.textContent = '';
+    beginGame();
+  } catch (err) {
+    console.error(err);
+    status.innerHTML = friendlyError(err) +
+      '<br><button class="btn secondary" id="demoBtn" style="margin-top:10px;font-size:.8em;padding:10px 20px">⌨ Play with keyboard instead (keys 1–5)</button>';
+    $('demoBtn').onclick = () => { demoMode = true; status.textContent = ''; beginGame(); };
+  } finally { btn.disabled = false; }
+});
+
+// Turn technical errors into kind, human messages
+function friendlyError(err) {
+  const n = err && err.name;
+  if (n === 'NotAllowedError' || n === 'PermissionDeniedError')
+    return '😊 No problem! The game needs your camera to see your face. Click the 🔒 / camera icon in the address bar, choose “Allow”, then press Start again. (Nothing is recorded or uploaded.)';
+  if (n === 'NotFoundError' || n === 'DevicesNotFoundError')
+    return '📷 We could not find a camera on this device. Plug one in and try again.';
+  if (n === 'NotReadableError')
+    return '📷 Your camera seems busy (another app may be using it). Close other apps and try again.';
+  return '⚠️ Could not start the AI: ' + (err && err.message ? err.message : err) +
+         '. Check your internet connection (needed once to download the model) and try again.';
+}
+
+/* ---------------------------------------------------------------
+   3.7  GAME FLOW:  beginGame → nextRound → (play) → endRound → … → endGame
+   --------------------------------------------------------------- */
+function beginGame() {
+  state.round = 0; state.score = 0; state.results = []; state.lastTarget = null;
+  $('roundMax').textContent = CONFIG.rounds;
+  $('diffPill').textContent = `${CONFIG.difficulty[state.difficulty].label} · ${roundSeconds()}s`;
+  $('best').textContent = Store.get(state.difficulty);
+  $('score').textContent = 0;
+  showScreen('Game');
+  clearInterval(state.timerId);
+  state.timerId = setInterval(tick, 40);       // main game clock (25 fps)
+  countdownThenStart();
+}
+
+// 3-2-1 "get ready" before round 1 so the player can settle in front of the camera
+function countdownThenStart() {
+  state.phase = 'feedback';
+  let n = 3;
+  const fb = $('feedback');
+  const step = () => {
+    if (n === 0) { hide(fb); return nextRound(); }
+    fb.className = 'feedback'; fb.textContent = 'Get ready… ' + n; show(fb);
+    Sound.tick(); n--; setTimeout(step, 800);
+  };
+  step();
+}
+
+function nextRound() {
+  if (state.round >= CONFIG.rounds) return endGame();
+  state.round++;
+  // pick a random emotion, never the same one twice in a row
+  let t;
+  do { t = EMOTIONS[Math.floor(Math.random() * EMOTIONS.length)]; } while (t === state.lastTarget);
+  state.target = state.lastTarget = t;
+
+  $('roundNum').textContent = state.round;
+  const big = $('bigEmoji');
+  big.textContent = t.emoji; $('targetName').textContent = t.label;
+  big.classList.remove('pop'); void big.offsetWidth; big.classList.add('pop');   // restart animation
+  document.querySelectorAll('.bar-row').forEach((r) => r.classList.toggle('target-row', r.id === 'row_' + t.key));
+
+  state.roundStart = performance.now(); state.holdStart = null; state.lastSecond = null;
+  state.phase = 'play';
+  hide($('feedback'));
+}
+
+// Runs every 40 ms: updates bars, checks the match, runs the countdown
+function tick() {
+  updateBars();
+  if (state.phase !== 'play') return;
+
+  const now = performance.now();
+  const limit = roundSeconds() * 1000;
+  const left = Math.max(0, limit - (now - state.roundStart));
+
+  // ---- Timer display (ring + number) ----
+  const secs = Math.ceil(left / 1000);
+  $('timerNum').textContent = secs;
+  $('timerArc').style.strokeDashoffset = 289 * (1 - left / limit);
+  $('timerWrap').classList.toggle('low', left <= 2000);
+  if (secs !== state.lastSecond) { if (secs <= 3 && secs > 0) Sound.tick(); state.lastSecond = secs; }
+
+  // ---- Match check: target must be the AI's top guess AND above the threshold ----
+  const top = topEmotion();
+  const matching = faceVisible && top.key === state.target.key && probs[top.key] >= CONFIG.minConfidence;
+  $('cam').classList.toggle('match', matching);
+
+  if (matching) {
+    if (state.holdStart === null) state.holdStart = now;        // start holding
+  } else {
+    state.holdStart = null;                                     // lost it → reset the 1 s hold
+  }
+  const held = state.holdStart === null ? 0 : now - state.holdStart;
+  $('holdFill').style.width = Math.min(100, (held / CONFIG.holdMs) * 100) + '%';
+  $('holdText').textContent = matching ? 'Keep holding… 👍' : 'Hold the expression for 1 second';
+
+  if (held >= CONFIG.holdMs) return endRound(true);             // success!
+  if (left <= 0) return endRound(false);                        // time up
+}
+
+// The emotion (incl. the grouped "other") with the highest probability
+function topEmotion() {
+  let best = { key: 'neutral', p: -1 };
+  Object.keys(probs).forEach((k) => { if (probs[k] > best.p) best = { key: k, p: probs[k] }; });
+  return best;
+}
+
+function endRound(ok) {
+  state.phase = 'feedback';
+  $('cam').classList.remove('match');
+  $('holdFill').style.width = '0';
+  state.results.push({ emoji: state.target.emoji, ok });
+  const fb = $('feedback');
+  if (ok) {
+    state.score += CONFIG.pointsPerMatch;
+    $('score').textContent = state.score;
+    fb.className = 'feedback ok'; fb.innerHTML = `✅ Matched!<br>+${CONFIG.pointsPerMatch}`;
+    Sound.correct();
+  } else {
+    fb.className = 'feedback fail'; fb.innerHTML = `⏰ Time's up!`;
+    Sound.timeUp();
+  }
+  show(fb);
+  setTimeout(nextRound, CONFIG.feedbackMs);
+}
+
+function endGame() {
+  clearInterval(state.timerId);
+  state.phase = 'idle';
+  const diff = state.difficulty;
+  const prev = Store.get(diff);
+  const isNew = state.score > prev;
+  if (isNew) Store.set(diff, state.score);
+
+  const label = CONFIG.difficulty[diff].label + ' – ' + roundSeconds() + 's';
+  $('finalScore').textContent = state.score;
+  $('correctCount').textContent = state.results.filter((r) => r.ok).length;
+  $('resDiff').textContent = label; $('resDiff2').textContent = CONFIG.difficulty[diff].label;
+  $('resBest').textContent = Math.max(prev, state.score);
+  $('newHigh').classList.toggle('hidden', !isNew || state.score === 0);
+  $('recap').innerHTML = state.results.map((r) => `<span class="${r.ok ? 'ok' : 'fail'}">${r.emoji} ${r.ok ? '✔' : '✘'}</span>`).join('');
+  showScreen('Results');
+  Sound.fanfare();
+}
+
+$('againBtn').onclick = () => { Sound.init(); beginGame(); };
+$('menuBtn').onclick = () => showScreen('Start');
+
+/* ---------------------------------------------------------------
+   3.8  Live confidence bars – shows the audience how the AI "thinks"
+   --------------------------------------------------------------- */
+function updateBars() {
+  const top = topEmotion().key;
+  Object.keys(probs).forEach((k) => {
+    const pct = Math.round(probs[k] * 100);
+    $('fill_' + k).style.width = pct + '%';
+    $('pc_' + k).textContent = pct + '%';
+    $('row_' + k).classList.toggle('top', k === top && faceVisible);
+  });
+}
+
+buildUI();
+</script>
+</body>
+</html>
